@@ -1,0 +1,33 @@
+Data sources:
+
+Topography - USGS 3DEP (3D Elevation Program) https://www.usgs.gov/3d-elevation-program
+	40x40km square from which a 20x20km AOI will be chosen (TBD)
+	10m resolution, resampled to 30m
+	EPSG:32612
+	Float32 GeoTIFF
+
+
+
+
+
+
+Hypothesis:
+	In a bounded region watched by ground-based line-of-sight sensors, least-exposure routes between any two points for a low-altitude vehicle (such as a drone) pass through terrain with significantly lower relative elevation (valleys, leeside of ridges, etc) and higher local relief than shortest-distance routes between the same endpoints. This effect holds across randomized sensor layouts and weakens as flight altitude (AGL) increases.
+
+
+
+
+
+
+
+Caveats:
+	- Bare-earth DEM (Digital Elevation Model) ignores trees/buildings
+	- Line-of-Sight does not necessarily indicate detection, just possibilty
+	- Perfect attacker knowledge may not always be possible in real world scenarios
+	- Turn-radius/climb-rate limits are not considered. Smoothing can be applied to the paths to decrease, but not eliminate, this concern
+	- A feature must be deeper than flight altitude to conceal vehicle
+
+Other ideas:
+	- Attacker-defender loop? Allow defender to learn from simulated attacks to optimize best sensor positions given limited # of sensors.
+	- Run attacker-path planning with limited or non-existent sensor knowledge
+	- Greedy maximization of coverage area 
