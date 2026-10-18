@@ -31,16 +31,19 @@ Caveat: the detection model is derived from the same DEM being tested, so this i
 
 ## 2. Open decisions (fill in)
 - [ ] Deadline / required scope: ____
-- [ ] Does the assignment allow non-JS prep steps? (assumed yes)
-- [x] Area of interest: Missoula, MT. 40 x 40 km window fetched at 30 m (`prep/fetch_dem.py` -> `data/dem_missoula_30m.tif`, EPSG:32612). Terrain variety checked (`prep/terrain_metrics.py`): good mix of flat valley floor, canyons, and dissected ridges. Still to choose: final 20 km sub-AOI.
+- [x] Area of interest: Missoula, MT. 40 x 40 km window fetched at 30 m (`prep/fetch_dem.py` -> `data/dem_missoula_30m.tif`, EPSG:32612). Terrain variety checked (`prep/terrain_metrics.py`): good mix of flat valley floor, canyons, and dissected ridges. Final 20 km sub-AOI (2026-10-17): cols 416:1083, rows 382:1049 of the 40 km grid (667 x 667 cells), x 264630-284640, y 5183580-5203590 (EPSG:32612). Clipped by `prep/clip_aoi.py` -> `data/aoi/*.f32` + `meta.json`. Metrics are clipped from the full-grid run so large-radius windows are not truncated at the AOI edge.
+- [x] Non-JS prep allowed, but keep as much as possible in JS.
 - [ ] Static vs. interactive final product: ____
 - [ ] Audience: class only, or also portfolio/employers: ____
 
 ## 2b. Decisions made
 - Build order: hand-placed sensors first (get the core pipeline working), then add greedy-optimized placement.
-- Detection model: probabilistic, with detection probability decaying with slant range (logistic, tunable R50 and steepness k). R50/k are ILLUSTRATIVE parameters, not real sensor specs. Show sensitivity to them.
-- Path cost is survival-based: cost per cell = -ln(1 - P_detect(c)), so summed path cost = -ln(probability of reaching goal undetected). Additive, so Dijkstra/A* stays exact. Headline metric = probability of surviving undetected.
-- Sensors assumed independent when combining: P(c) = 1 - prod(1 - P_i(c)). State this assumption.
+- Sensor: generic notional ground-based X-band pulse-Doppler counter-UAS surveillance radar (mast-mounted, 3D). No real product or specs.
+- Detection model (physically shaped, notionally parameterized): radar range equation SNR ∝ σ / r⁴, Swerling I per-scan Pd = Pfa^(1/(1+SNR)), Pfa = 1e-6. Single anchor = per-scan R50 for the reference RCS (default σ = 0.01 m² small quadcopter). Plus a clearance ramp on SNR near the masking line (A − A_min over ~20 m), min/max range, and elevation-coverage limits. Anchor is ILLUSTRATIVE; sweep it.
+- Path cost is TIME-BASED (hazard rate): hazard_i(c) = -ln(1 - Pd_scan,i(c)) / (v · T_scan) per meter flown; step cost = step_length · Σ_i hazard_i. Summed path cost = -ln(P survive undetected). Additive, so Dijkstra/A* stays exact; diagonal steps correctly cost √2 more; drone speed v and scan time T_scan become analysis variables. Headline metric = probability of surviving undetected.
+- Sensors assumed independent (summing hazards = independence). State this assumption.
+- Scenario: AREA defense of the whole 20 × 20 km AOI (not point defense), to expose terrain variation across the Missoula valley. Many sensors needed (see §5 sensor count).
+- Calibration note: with dwell accumulation, effective crossing range ≈ 1.7–1.8 × per-scan R50 (v = 15 m/s, T_scan = 1 s), and coverage edges in open terrain are sharp; soft edges come from terrain. Choose per-scan R50 ≈ 2 km so effective small-drone range ≈ 3.5 km.
 - Attacker is assumed to know all sensor positions and the model exactly (pessimistic for defender). State this.
 - Missoula County (or nearby) is acceptable as a NOTIONAL defended valley; not a realistic adversary scenario. Say so in the write-up.
 
@@ -53,13 +56,14 @@ Caveat: the detection model is derived from the same DEM being tested, so this i
 ## 4. Processing pipeline (all rasters on the same grid)
 1. DEM -> hillshade + slope (+ roughness)
 2. Per sensor: **minimum visible altitude (AGL)** raster via radial sweep tracking horizon angle (include earth curvature, sensor height, max range). Cheaper and more useful than a binary viewshed: altitude slider = simple threshold.
-3. Per-sensor detection probability at altitude A: P_i(c) = 0 if masked (minAlt_i(c) > A), else logistic(slant_range; R50, k), with a hard max-range cutoff
-4. Combined detection probability: P(c) = 1 - prod_i(1 - P_i(c)). Visualize as a continuous field (soft-edged dead zones)
-5. Cost surface: -ln(1 - P(c)) per cell (+ optional small slope/roughness term). Keep the survival term separate from terrain terms so the survival metric stays interpretable
+3. Per-sensor per-scan Pd at altitude A: 0 if masked (minAlt_i(c) > A), outside min/max range, or outside elevation coverage; else Swerling I on SNR(slant range, σ) × clearance ramp
+4. Hazard per meter: h(c) = Σ_i -ln(1 - Pd_i(c)) / (v · T_scan). Visualize h (or P detected per km flown) as a continuous field
+5. Cost per step: step_length × h(c) (+ optional small slope/roughness term). Keep the survival term separate from terrain terms so the survival metric stays interpretable
 6. Least-exposure path: A*/Dijkstra (binary heap) from start to goal
 7. Comparison: straight-line vs. least-exposure path (length, P(survive undetected)); survival-probability profile along each path
 
 ## 5. Sensor placement (see discussion in chat)
+- Sensor count (draft estimate, 2026-10-13): rough DEM check showed a sensor sees ~50% of its 3 km disk at 50 m AGL, ~65% at 150 m, ~77% at 300 m (ridge sites slightly better, valley sites worse). With ~3.5 km effective range: flat-earth hex packing ≈ 13 sensors; terrain-aware greedy for ~85% coverage at 150 m AGL ≈ 15–20 (estimate). Baseline N = 12, sweep N ∈ {6, 12, 18, 24} as an experiment axis. Confirm with a greedy coverage-vs-N curve once the viewshed code exists.
 - Phase A (first): hand-placed notional sites on ridgelines/approach-corridor overlooks. This is the baseline layout.
 - Phase B: candidate generation: high local maxima/ridgeline points with prominence, slope limits, within X km of roads/power (practical siting).
 - Selection: greedy maximization of expected coverage, sum_c w(c) * (1 - prod_i(1 - P_i(c))). This objective is monotone submodular, so greedy has a (1 - 1/e) guarantee (mention in methods).
@@ -114,9 +118,9 @@ Tech: geotiff.js or binary FileAttachment, typed arrays, canvas ImageData for ra
 ## 10. Notes for Claude Code
 - Prefer the minimum-visible-altitude formulation over binary viewshed.
 - Keep all rasters on one shared grid/CRS; document cell size and CRS in the data prep script.
-- Validate viewshed output against `gdal_viewshed` on a test sensor before trusting the JS implementation.
+- Validate viewshed output against `gdal_viewshed` on a test sensor before trusting the JS implementation. DONE 2026-10-18 (`prep/validate_viewshed.py`, GDAL 3.10.3 in Docker, `-om GROUND -cc 0.75`): 4 sites (ridge, valley floor, mid-slope, AOI edge), median difference 0.0 m, 99.2-100% agreement on visible/hidden at 1/50/150/300 m AGL. Residual radial streaks (p99 |diff| 2-36 m) are GDAL's sweep approximation: on the 300 worst cells per site, JS is closer to a 10x denser ray sample in 100% of cases (median error JS 0.6-6 m vs GDAL 31-52 m).
 - Use slant range (3D distance incl. altitude difference) in the detection function, not just horizontal distance.
-- Implement the path cost as -ln(1 - P), clamp P to < 1 (e.g. 0.999) to avoid infinite cost.
+- Implement the path cost as step_length × Σ_i -ln(1 - Pd_i) / (v · T_scan); clamp Pd_i to < 1 (e.g. 0.999) to avoid infinite cost.
 - Build order: hand-placed sensors first; greedy optimization only after the core pipeline works.
 - Path planning: Dijkstra/A* is the primary method (exact for additive cost). Extensions in section 8b order: flow field -> 3D layers -> smoothing -> PSO comparison. Do not make PSO the main planner.
 - Everything here is notional and unclassified; use only public data.

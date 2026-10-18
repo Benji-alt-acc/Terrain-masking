@@ -1,0 +1,93 @@
+// Single-sensor "shadow map" cells for the Observable notebook (OJS).
+// Paste each block below into its OWN cell. Needs meta, layers from the loading
+// cells, plus js/viewshed.js uploaded as a file attachment named viewshed.js.
+
+// ---- cell: load the viewshed module from its attachment ----
+vs = {
+  const src = await FileAttachment("viewshed.js").text();
+  return import(URL.createObjectURL(new Blob([src], {type: "text/javascript"})));
+}
+
+// ---- cell: sensor position (click the map to move it) ----
+viewof sensor = {
+  const el = html`<div style="font: 13px sans-serif">`;
+  el.value = {x: 276705, y: 5192985};  // hilltop near the AOI centre (UTM 12N m)
+  const show = () => el.textContent = `Sensor at E ${el.value.x.toFixed(0)}, N ${el.value.y.toFixed(0)}. Click the map to move it.`;
+  show();
+  el.addEventListener("input", show);
+  return el;
+}
+
+// ---- cell ----
+viewof mastHeight = Inputs.range([2, 50], {value: 10, step: 1, label: "Mast height (m)"})
+
+// ---- cell ----
+viewof maxRange = Inputs.range([1000, 10000], {value: 6000, step: 500, label: "Max range (m)"})
+
+// ---- cell: minimum visible height above ground, per cell (NaN = out of range) ----
+minAGL = vs.minVisibleAGL(layers.dem, meta, sensor, {height: mastHeight, maxRange})
+
+// ---- cell: colours shared by the map and its legend ----
+shadowStyle = ({
+  deep: 300,               // m AGL at which a shadow is fully dark (sqrt scale)
+  lit: [255, 236, 190],    // warm light: visible at ground level
+  dark: [40, 60, 120],     // cool shadow tint
+  outOfRange: [55, 58, 66] // beyond max range: unlit, desaturated
+})
+
+// ---- cell: the shadow map ----
+shadowMap = {
+  const {width: W, height: H, cell_m: cell, xmin, ymax} = meta;
+  const {deep, lit, dark, outOfRange} = shadowStyle;
+  const hs = layers.hillshade;
+  const sc = (sensor.x - xmin) / cell - 0.5, sr = (ymax - sensor.y) / cell - 0.5;
+  const ctx = DOM.context2d(W, H, 1);
+  const img = ctx.createImageData(W, H), px = img.data;
+  for (let i = 0; i < W * H; i++) {
+    const g = 0.3 + 0.7 * Math.min(Math.max(hs[i], 0), 1);  // terrain relief shading
+    const a = minAGL[i];
+    if (Number.isNaN(a)) {
+      for (let k = 0; k < 3; k++) px[4 * i + k] = outOfRange[k] * g;
+    } else {
+      const d = Math.hypot(i % W - sc, Math.floor(i / W) - sr) * cell / maxRange;
+      const glow = 1 - 0.3 * d * d;                // gentle lamp falloff (cosmetic)
+      const s = Math.sqrt(Math.min(a, deep) / deep); // 0 = lit, 1 = deep shadow
+      const b = g * glow * (1 - 0.75 * s);
+      for (let k = 0; k < 3; k++) px[4 * i + k] = (lit[k] * (1 - s) + dark[k] * s) * b;
+    }
+    px[4 * i + 3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+
+  // Range ring and sensor marker (canvas pixel = cell, centre at +0.5).
+  ctx.strokeStyle = "rgba(255,255,255,0.6)";
+  ctx.beginPath(); ctx.arc(sc + 0.5, sr + 0.5, maxRange / cell, 0, 2 * Math.PI); ctx.stroke();
+  ctx.fillStyle = "#ff5028"; ctx.strokeStyle = "white"; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.arc(sc + 0.5, sr + 0.5, 5, 0, 2 * Math.PI); ctx.fill(); ctx.stroke();
+
+  const canvas = ctx.canvas;
+  canvas.style.cssText = "width: 100%; max-width: 667px; cursor: crosshair";
+  canvas.onclick = (e) => {
+    const r = canvas.getBoundingClientRect();
+    viewof sensor.value = {
+      x: xmin + (e.clientX - r.left) / r.width * W * cell,
+      y: ymax - (e.clientY - r.top) / r.height * H * cell
+    };
+    viewof sensor.dispatchEvent(new Event("input", {bubbles: true}));
+  };
+  return canvas;
+}
+
+// ---- cell: legend ----
+Plot.legend({
+  color: {
+    type: "sqrt",
+    domain: [0, shadowStyle.deep],
+    interpolate: (t) => {
+      const {lit, dark} = shadowStyle, b = 0.85 * (1 - 0.75 * t);
+      return `rgb(${lit.map((v, k) => (v * (1 - t) + dark[k] * t) * b)})`;
+    },
+    label: "Min visible height above ground (m): darker = more room to hide"
+  },
+  width: 400
+})

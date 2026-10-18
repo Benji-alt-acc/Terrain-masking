@@ -1,0 +1,206 @@
+// Milestone 3: multi-sensor exposure map with altitude slider (OJS).
+// Paste each block below into its OWN cell.
+//
+// Reuses from earlier cells: meta, layers, vs, mastHeight, maxRange, shadowStyle.
+// Attachments: re-upload js/viewshed.js (it now also exports groundElevation)
+// and upload js/detection.js as detection.js.
+
+// ---- cell: load the detection module ----
+det = {
+  const src = await FileAttachment("detection.js").text();
+  return import(URL.createObjectURL(new Blob([src], {type: "text/javascript"})));
+}
+
+// ---- cell: sensor layout (edit on the map) ----
+viewof layout = {
+  const el = html`<div style="font: 13px sans-serif">`;
+  // Starting layout: highest point in each block of a 4 x 3 grid over the AOI
+  // (UTM 12N m). Notional sites; edit freely.
+  el.value = [
+    {x: 267675, y: 5202105}, {x: 272445, y: 5201265}, {x: 278475, y: 5202255}, {x: 281805, y: 5202255},
+    {x: 268605, y: 5194065}, {x: 273615, y: 5192505}, {x: 276705, y: 5192985}, {x: 283635, y: 5194485},
+    {x: 268605, y: 5187105}, {x: 273135, y: 5187465}, {x: 278085, y: 5184945}, {x: 281085, y: 5185245}
+  ];
+  const show = () => el.textContent = `${el.value.length} sensors. Click the map to add one, drag to move, shift-click to remove.`;
+  show();
+  el.addEventListener("input", show);
+  return el;
+}
+
+// ---- cell ----
+viewof altitude = Inputs.range([10, 500], {value: 150, step: 10, label: "Flight altitude (m AGL)"})
+
+// ---- cell: detection-model inputs (rest of the parameters stay at det.defaults) ----
+viewof detForm = Inputs.form({
+  r50: Inputs.range([500, 5000], {value: 2000, step: 100, label: "Per-scan R50 (m)"}),
+  rcs: Inputs.select(new Map([
+    ["0.01 m² (small quadcopter)", 0.01],
+    ["0.1 m² (large multirotor)", 0.1],
+    ["1 m² (small fixed-wing)", 1]
+  ]), {label: "Target RCS"}),
+  speed: Inputs.range([5, 40], {value: 15, step: 1, label: "Drone speed (m/s)"})
+})
+
+// ---- cell ----
+detParams = ({...det.defaults, ...detForm})
+
+// ---- cell: cache of per-sensor min-visible-AGL rasters (persists across edits) ----
+minAGLCache = new Map()
+
+// ---- cell: per-sensor records; only new or moved sensors are ray-traced ----
+sensorRecords = {
+  const keys = new Set();
+  const records = layout.map(({x, y}) => {
+    const key = `${x},${y},${mastHeight},${maxRange}`;
+    keys.add(key);
+    if (!minAGLCache.has(key)) {
+      minAGLCache.set(key, vs.minVisibleAGL(layers.dem, meta, {x, y}, {height: mastHeight, maxRange}));
+    }
+    return {x, y, maxRange, z0: vs.groundElevation(layers.dem, meta, x, y) + mastHeight, minAGL: minAGLCache.get(key)};
+  });
+  for (const k of minAGLCache.keys()) if (!keys.has(k)) minAGLCache.delete(k);
+  return records;
+}
+
+// ---- cell: lowest min-visible-AGL over all sensors (altitude-independent) ----
+coverMinAGL = det.combinedMinAGL(sensorRecords, meta.width * meta.height)
+
+// ---- cell: total hazard per metre flown at the chosen altitude ----
+hazard = det.hazardField(layers.dem, meta, sensorRecords, altitude, detParams)
+
+// ---- cell ----
+viewof mapView = Inputs.radio(["Detection per km flown", "Shadow depth"], {value: "Detection per km flown", label: "Show"})
+
+// ---- cell: the exposure map (also the sensor editor) ----
+exposureMap = {
+  const {width: W, height: H, cell_m: cell, xmin, ymax} = meta;
+  const {deep, lit, dark, outOfRange} = shadowStyle;
+  const hs = layers.hillshade, detect = mapView === "Detection per km flown";
+  const ctx = DOM.context2d(W, H, 1);
+  const img = ctx.createImageData(W, H), px = img.data;
+  for (let i = 0; i < W * H; i++) {
+    const g = 0.3 + 0.7 * Math.min(Math.max(hs[i], 0), 1);
+    if (detect) {
+      const t = 1 - Math.exp(-1000 * hazard[i]);  // P(detected per km flown): 0 = dark, 1 = lit
+      const b = g * (0.25 + 0.75 * t);
+      for (let k = 0; k < 3; k++) px[4 * i + k] = (dark[k] * (1 - t) + lit[k] * t) * b;
+    } else {
+      const a = coverMinAGL[i];
+      if (Number.isNaN(a)) {
+        for (let k = 0; k < 3; k++) px[4 * i + k] = outOfRange[k] * g;
+      } else {
+        const s = Math.sqrt(Math.min(a, deep) / deep);
+        const b = g * (1 - 0.75 * s);
+        for (let k = 0; k < 3; k++) px[4 * i + k] = (lit[k] * (1 - s) + dark[k] * s) * b;
+      }
+    }
+    px[4 * i + 3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+
+  ctx.fillStyle = "#ff5028"; ctx.strokeStyle = "white"; ctx.lineWidth = 1.5;
+  for (const s of layout) {
+    ctx.beginPath();
+    ctx.arc((s.x - xmin) / cell, (ymax - s.y) / cell, 5, 0, 2 * Math.PI);
+    ctx.fill(); ctx.stroke();
+  }
+
+  // Editing: click empty map = add, drag a sensor = move, shift-click a sensor = remove.
+  const canvas = ctx.canvas;
+  canvas.style.cssText = "width: 100%; max-width: 667px; cursor: crosshair; touch-action: none";
+  const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
+  const toXY = (e) => {
+    const r = canvas.getBoundingClientRect();
+    return {
+      x: clamp(xmin + (e.clientX - r.left) / r.width * W * cell, xmin, xmin + W * cell - 1),
+      y: clamp(ymax - (e.clientY - r.top) / r.height * H * cell, ymax - H * cell + 1, ymax)
+    };
+  };
+  const hitRadius = () => 8 * W * cell / canvas.getBoundingClientRect().width;  // 8 screen px in metres
+  const hit = (p) => layout.findIndex((s) => Math.hypot(s.x - p.x, s.y - p.y) < hitRadius());
+  const commit = (value) => {
+    viewof layout.value = value;
+    viewof layout.dispatchEvent(new Event("input", {bubbles: true}));
+  };
+  let drag = -1;
+  canvas.onpointerdown = (e) => {
+    const p = toXY(e), i = hit(p);
+    if (i < 0) return commit([...layout, p]);
+    if (e.shiftKey) return commit(layout.filter((_, j) => j !== i));
+    drag = i;
+    canvas.setPointerCapture(e.pointerId);
+    canvas.style.cursor = "grabbing";
+  };
+  canvas.onpointerup = (e) => {
+    if (drag < 0) return;
+    const p = toXY(e), i = drag;
+    drag = -1;
+    canvas.style.cursor = "crosshair";
+    if (Math.hypot(p.x - layout[i].x, p.y - layout[i].y) > hitRadius() / 4) {
+      commit(layout.map((s, j) => (j === i ? p : s)));
+    }
+  };
+  return canvas;
+}
+
+// ---- cell: legend for whichever view is showing ----
+mapView === "Detection per km flown"
+  ? Plot.legend({
+      color: {
+        domain: [0, 1],
+        interpolate: (t) => {
+          const {lit, dark} = shadowStyle, b = 0.85 * (0.25 + 0.75 * t);
+          return `rgb(${dark.map((v, k) => (v * (1 - t) + lit[k] * t) * b)})`;
+        },
+        tickFormat: "%",
+        label: `Chance of detection per km flown at ${altitude} m AGL`
+      },
+      width: 400
+    })
+  : Plot.legend({
+      color: {
+        type: "sqrt",
+        domain: [0, shadowStyle.deep],
+        interpolate: (t) => {
+          const {lit, dark} = shadowStyle, b = 0.85 * (1 - 0.75 * t);
+          return `rgb(${lit.map((v, k) => (v * (1 - t) + dark[k] * t) * b)})`;
+        },
+        label: "Min visible height above ground, any sensor (m): darker = more room to hide"
+      },
+      width: 400
+    })
+
+// ---- cell: summary at this altitude ----
+exposureStats = {
+  const n = meta.width * meta.height;
+  let masked = 0, risky = 0;
+  for (let i = 0; i < n; i++) {
+    if (!(coverMinAGL[i] < altitude)) masked++;              // no sensor has line of sight (or none in range)
+    if (1 - Math.exp(-1000 * hazard[i]) > 0.5) risky++;      // > 50% detection chance per km flown
+  }
+  const pct = (v) => `${(100 * v / n).toFixed(0)}%`;
+  return md`At **${altitude} m AGL** with ${layout.length} sensors: **${pct(masked)}** of the area is out of every sensor's line of sight, and **${pct(risky)}** has a better than 50% chance of detection per km flown.`;
+}
+
+// ---- cell: detection model vs range, unmasked open terrain (sanity check) ----
+Plot.plot({
+  width: 640,
+  height: 260,
+  x: {label: "Slant range (m)"},
+  y: {label: "Probability", domain: [0, 1], grid: true},
+  color: {legend: true},
+  marks: [
+    Plot.line(
+      d3.range(100, 6001, 25).flatMap((R) => {
+        const pd = det.pdScan(R, Infinity, detParams);
+        return [
+          {R, p: pd, kind: "Per scan"},
+          {R, p: 1 - Math.exp(-1000 * det.hazardOf(pd, detParams)), kind: "Per km flown at this range"}
+        ];
+      }),
+      {x: "R", y: "p", stroke: "kind"}
+    ),
+    Plot.ruleX([detParams.r50], {strokeDasharray: "4,3"}),
+    Plot.ruleY([0])
+  ]
+})
