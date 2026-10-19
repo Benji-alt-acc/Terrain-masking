@@ -140,6 +140,7 @@ routes2 = {
     terrain: terrain.points,
     rangeOnly: rangeOnly.points,
     straight: [[start.x, start.y], [goal.x, goal.y]],
+    terrainPenalty: enduranceLimit2 ? terrain.penalty : opts.lengthPenalty,  // per metre; reused by flowField2
     limit: enduranceLimit2 ? {maxLength, terrainBinding: terrain.binding, rangeOnlyBinding: rangeOnly.binding} : null
   };
 }

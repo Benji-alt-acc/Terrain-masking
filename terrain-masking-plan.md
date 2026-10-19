@@ -29,6 +29,13 @@ Test design:
 
 Caveat: the detection model is derived from the same DEM being tested, so this is a simulation study of what LOS geometry favors, not an empirical finding.
 
+## 1c. Hypothesis result (2026-10-19)
+Batch: `prep/hypothesis_batch.mjs` (10 randomized layouts x 20 AOI pairs x 7 altitudes 10-300 m, iteration 2 setup, endurance 2x; 4200 routes) -> `prep/hypothesis_stats.py` -> `data/batch/hypothesis_effects.csv`, `exposure_summary.csv`, `output/hypothesis_effects.png`.
+- **H0 rejected.** Terrain-aware routes run through lower relative elevation and more relief than both the range-only control and the straight line, at every altitude. Strongest at r = 150 m: rank-biserial vs range-only DEV -0.73 to -0.88, TPI -0.75 to -0.89, relief +0.72 to +0.80; all Holm-significant, 10/10 layouts agree in sign for DEV/TPI (9-10 for relief), layout-level Wilcoxon p <= 0.006.
+- **Weakens with altitude: supported in magnitude, not in consistency.** Median DEV_150 difference halves from -0.107 (20 m) to -0.052 (300 m); relief_150 from +25 m to +14 m; exposure saved vs range-only falls from 89% (10 m) to 44% (300 m). The rank effect size stays high because routes still prefer local lows at every altitude.
+- **Scale grows with altitude: not supported.** 150 m is the strongest radius for DEV/TPI at every altitude (relief shifts to 500 m only at 150-300 m). At r = 1.5 km, DEV/TPI are POSITIVE vs range-only below 300 m: routes hide in small drainages within the higher, dissected hills rather than on the broad valley floor, which is flat and visible to many sensors.
+- Caveats: endurance limit binds for 53-98% of terrain-aware routes (median length 1.7x straight); 21% of terrain-aware routes enter the buffer; detection model derived from the same DEM (simulation study, not an empirical finding); pairs within a layout share sensors (hence the layout-level check).
+
 ## 2. Open decisions (fill in)
 - [ ] Deadline / required scope: ____
 - [x] Area of interest: Missoula, MT. 40 x 40 km window fetched at 30 m (`prep/fetch_dem.py` -> `data/dem_missoula_30m.tif`, EPSG:32612). Terrain variety checked (`prep/terrain_metrics.py`): good mix of flat valley floor, canyons, and dissected ridges. Final 20 km sub-AOI (2026-10-17): cols 416:1083, rows 382:1049 of the 40 km grid (667 x 667 cells), x 264630-284640, y 5183580-5203590 (EPSG:32612). Clipped by `prep/clip_aoi.py` -> `data/aoi/*.f32` + `meta.json`. Metrics are clipped from the full-grid run so large-radius windows are not truncated at the AOI edge.
@@ -51,6 +58,10 @@ Caveat: the detection model is derived from the same DEM being tested, so this i
   - Buffered routing domain: AOI + 5 km (`prep/clip_domain.py`, 1001 x 1001), sensors at the same block density in the buffer (30 total). AOI edge strip is now as dark as the interior (16% vs 15% at 50 m, R50 3 km; AOI-only: 24% vs 17%). Endpoints and analysis stay in the AOI.
   - Evidence: `prep/gap_vs_r50.mjs` -> `data/domain/gap_vs_r50.csv`.
   - Endurance limit (optional toggle, default 2x straight-line distance): below ~30 m AGL unlimited routes wander 100-140 km and hug the domain's outer edge (the buffer just moves the edge). `route.leastExposureRouteWithin` = Lagrangian relaxation (smallest extra per-metre penalty whose route fits). Default endpoints, terrain-aware vs range-only expected detections with the limit: 10 m 23.9 vs 30.7, 20 m 147 vs 179, 30 m 164 vs 191, 50 m 183 vs 206 (limit not binding at >= 50 m). Use a fixed detour factor in the hypothesis batch.
+- Low-altitude checks (2026-10-19, `prep/low_altitude_checks.mjs` -> `data/domain/low_altitude_checks.csv`; iteration 2 setup, 10 random AOI pairs, endurance 2x). Terrain saving = 1 - terrain-aware / range-only expected detections.
+  - DEM resolution: 10 m DEM (`prep/fetch_domain_10m.py`; hazard averaged to 30 m for routing) matches 30 m within 1 pt dark share and 0-4 pts median saving at 10-100 m AGL. 30 m grid is adequate.
+  - Clearance ramp: dark share at 10 m AGL depends strongly on ramp width (23% at 0-10 m, 35% at 20 m, 51% at 40 m); negligible at >= 50 m. Median terrain saving is robust (72-78% at 10 m, 32-37% at 100 m for all widths) and falls with altitude for every width. Report absolute 10-20 m dark shares as ramp-dependent.
+  - Saving > 0 for every pair, setting and altitude. Median saving across pairs (78% at 10 m, 50% at 50 m) is far higher than the default endpoints (22% / 11%), which are a hard case.
 - Missoula County (or nearby) is acceptable as a NOTIONAL defended valley; not a realistic adversary scenario. Say so in the write-up.
 
 ## 3. Data

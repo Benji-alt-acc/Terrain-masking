@@ -1,0 +1,44 @@
+// Hypothesis result: ONE cell (OJS).
+// Attachments (from data/batch/, written by prep/hypothesis_stats.py):
+//   hypothesis_effects.csv, exposure_summary.csv
+// Batch: 10 randomized sensor layouts x 20 AOI start-goal pairs x 7 altitudes
+// (prep/hypothesis_batch.mjs; iteration 2 setup, endurance limit 2x).
+
+// ---- cell ----
+hypothesisResult = {
+  const eff = (await FileAttachment("hypothesis_effects.csv").csv({typed: true})).filter((d) => d.metric !== "slope");
+  const expo = await FileAttachment("exposure_summary.csv").csv({typed: true});
+  const label = {dev: "DEV (normalized relative elevation)", tpi: "TPI (relative elevation, m)", relief: "Local relief (m)"};
+  const compLabel = {range: "vs range-only route", straight: "vs straight line"};
+  const data = eff.map((d) => ({...d, metricLabel: label[d.metric], compLabel: compLabel[d.comparison], sig: d.p_holm < 0.05}));
+  const alts = [...new Set(data.map((d) => d.altitude))].sort((a, b) => a - b);
+  const chart = Plot.plot({
+    width: 900,
+    height: 460,
+    marginRight: 70,
+    fx: {label: null, domain: Object.values(label)},
+    fy: {label: null, domain: Object.values(compLabel)},
+    x: {type: "log", label: "Neighbourhood radius r (m)", ticks: [150, 500, 1500], tickFormat: "d"},
+    y: {label: "Effect size (rank-biserial r)", domain: [-1, 1], grid: true},
+    color: {type: "ordinal", domain: alts, scheme: "viridis", legend: true, label: "Altitude (m AGL)"},
+    marks: [
+      Plot.ruleY([0], {stroke: "#999"}),
+      Plot.line(data, {fx: "metricLabel", fy: "compLabel", x: "radius", y: "rank_biserial", stroke: "altitude", z: "altitude"}),
+      Plot.dot(data, {fx: "metricLabel", fy: "compLabel", x: "radius", y: "rank_biserial", stroke: "altitude",
+                      fill: (d) => (d.sig ? d.altitude : "white"), r: 3.5,
+                      title: (d) => `${d.metric.toUpperCase()} r=${d.radius} m, ${d.altitude} m AGL\nrank-biserial ${d.rank_biserial.toFixed(2)}, median diff ${d.median_diff.toFixed(3)}\nHolm p ${d.p_holm.toExponential(1)}, ${d.layouts_same_sign}/10 layouts same sign`})
+    ]
+  });
+  const fmt = (v) => `${(100 * v).toFixed(0)}%`;
+  const rows = expo.map((d) => html`<tr><td>${d.altitude} m</td><td>${fmt(d.saving_vs_range)}</td><td>${fmt(d.saving_vs_straight)}</td><td>${d.detour_terrain.toFixed(2)}×</td></tr>`);
+  return html`<figure style="margin: 0">
+    ${chart}
+    <figcaption>Terrain along terrain-aware least-exposure routes compared with the range-only control route (top) and the straight line (bottom).
+      Negative = the terrain-aware route runs lower than its surroundings (valleys, lee sides); positive relief = more vertical structure nearby.
+      Filled dots: significant after Holm correction. 10 randomized sensor layouts × 20 start–goal pairs per altitude.</figcaption>
+    <table style="margin-top: 12px; font-size: 13px">
+      <thead><tr><th>Altitude</th><th>Exposure saved vs range-only</th><th>vs straight line</th><th>Terrain-aware route length / straight</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  </figure>`;
+}

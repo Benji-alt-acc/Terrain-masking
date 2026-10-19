@@ -1,0 +1,108 @@
+// Top-of-notebook dashboard (OJS): layoutPreset2 (sensor-layout presets), controls2
+// (the control panel) and dashboard2 (the two maps). Put controls2 and dashboard2 at
+// the top in that order; layoutPreset2 is shown inside controls2, so its own cell can
+// sit anywhere (e.g. with the model internals).
+//
+// controls2 moves the existing iteration 2 inputs into one compact panel (an input
+// element can only be shown in one place, so its original cell's output becomes
+// empty; the input keeps driving every cell that uses it). dashboard2 shows the
+// flow field and exposureMap2 side by side (stacked on narrow screens).
+//
+// Tip: move the original input cells, exposureMap2, flowField2 and the old legend
+// cell into a "Model internals" section further down; their outputs are now empty
+// or shown here. The legend cell can be deleted (dashboard2 draws its own).
+// No new attachments.
+
+// ---- cell: sensor layout presets (writes into layout2; manual edits still work afterwards) ----
+// High ground = highest point in the central 60% of each block (the iteration 2 default).
+// Randomized = a random cell among the top 20% of elevations in each block, the rule and
+// seeds of prep/hypothesis_batch.mjs: random layouts 0-9 are exactly the batch's layouts.
+viewof layoutPreset2 = {
+  const {width: W, height: H, cell_m: cell, xmin, ymax, aoi} = meta2, dem = layers2.dem;
+  const B = aoi.col, A = aoi.size;
+  const colEdges = [0, B, B + Math.floor(A / 4), B + Math.floor(A / 2), B + Math.floor(3 * A / 4), B + A, W];
+  const rowEdges = [0, B, B + Math.floor(A / 3), B + Math.floor(2 * A / 3), B + A, H];
+  const blocks = [];  // cells of each block's central 60%, highest first
+  for (let j = 0; j < rowEdges.length - 1; j++) for (let i = 0; i < colEdges.length - 1; i++) {
+    const c0 = colEdges[i], c1 = colEdges[i + 1], r0 = rowEdges[j], r1 = rowEdges[j + 1];
+    const mc = Math.floor((c1 - c0) / 5), mr = Math.floor((r1 - r0) / 5), cells = [];
+    for (let r = r0 + mr; r < r1 - mr; r++) for (let c = c0 + mc; c < c1 - mc; c++) cells.push(r * W + c);
+    blocks.push(cells.sort((a, b) => dem[b] - dem[a]));
+  }
+  const toXY = (k) => ({x: xmin + (k % W + 0.5) * cell, y: ymax - (Math.floor(k / W) + 0.5) * cell});
+  const rng = (seed) => () => ((seed = (seed + 0x6D2B79F5) | 0), (((seed ^ (seed >>> 15)) * (1 | seed)) >>> 0) / 2 ** 32);
+  const highGround = () => blocks.map((cells) => toXY(cells[0]));
+  const randomized = (n) => {
+    const rand = rng(1000 + n);
+    return blocks.map((cells) => toXY(cells[Math.floor(rand() * Math.ceil(0.2 * cells.length))]));
+  };
+
+  const select = html`<select style="width: 150px">
+    <option value="high">High ground (default)</option>
+    <option value="random">Randomized</option>
+  </select>`;
+  const button = html`<button style="margin-left: 6px">New random layout</button>`;
+  const el = html`<div><div style="display: flex; align-items: center; gap: 6px">
+    <span style="width: 105px">Sensor layout</span>${select}${button}</div>
+    <div style="color: #777; font-size: 12px; margin-top: 4px">WARNING: recomputing sensors takes time</div></div>`;
+  let n = 0;
+  const apply = (preset) => {
+    el.value = {preset, n};
+    viewof layout2.value = preset === "high" ? highGround() : randomized(n);
+    viewof layout2.dispatchEvent(new Event("input", {bubbles: true}));
+  };
+  select.onchange = () => apply(select.value);
+  button.onclick = () => { if (select.value === "random") n++; select.value = "random"; apply("random"); };
+  el.value = {preset: "high", n};
+  return el;
+}
+
+// ---- cell: control panel ----
+controls2 = {
+  const group = (title, hint, ...items) => html`<fieldset style="border: 1px solid #ccc; border-radius: 6px; padding: 6px 10px 8px; margin: 0; min-width: 0">
+    <legend style="font-weight: 600; padding: 0 4px">${title}</legend>
+    ${hint ? html`<div style="color: #777; font-size: 12px; margin-bottom: 4px">${hint}</div>` : ""}
+    ${items}
+  </fieldset>`;
+  return html`<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 10px;
+      font: 13px var(--sans-serif, sans-serif); --label-width: 105px; --input-width: 150px">
+    ${group("Flight", "Altitude above ground is the biggest lever: lower = more terrain to hide behind.",
+            viewof altitude2, viewof enduranceLimit2)}
+    ${group("Sensors and detection", "Notional radar: R50 = range where one scan detects half the time.",
+            viewof layoutPreset2, viewof detForm2)}
+    ${group("Routes", "0 = pure least exposure; higher values favour shorter routes.",
+            viewof lengthPenalty2, viewof mapView2)}
+    ${group("Map clicks", "Left map: click to move the goal. Right map: edits whatever is selected here.",
+            viewof editMode2, viewof endpoints2, viewof layout2)}
+  </div>`;
+}
+
+// ---- cell: the two visuals, side by side ----
+dashboard2 = {
+  const {lit, dark} = shadowStyle;
+  const legend = Plot.legend({
+    color: {
+      domain: [0, 1],
+      interpolate: (t) => `rgb(${dark.map((v, k) => (v * (1 - t) + lit[k] * t) * 0.85 * (0.25 + 0.75 * t))})`,
+      tickFormat: "%",
+      label: `Chance of detection per km flown at ${altitude2} m AGL (buffer dimmed)`
+    },
+    width: 320
+  });
+  const e = routeEval2, f = (r) => `${(r.length / 1000).toFixed(1)} km, ${r.cumHazard.toFixed(1)} expected detections`;
+  const panel = (title, hint, content) => html`<div style="flex: 1 1 380px; min-width: 300px">
+    <div style="font: 600 14px var(--sans-serif, sans-serif)">${title}</div>
+    <div style="font: 12px var(--sans-serif, sans-serif); color: #777; margin-bottom: 4px">${hint}</div>
+    ${content}
+  </div>`;
+  return html`<div style="display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start">
+    ${panel("Where safe routes flow", "Particles follow the least-exposure path to the goal (yellow) from everywhere. Click to move the goal.", flowField2)}
+    ${panel(mapView2, `Cyan: terrain-aware route · orange: range-only · dashed: straight. Clicks edit ${editMode2 === "Sensors" ? "sensors (click add, drag move, shift-click remove)" : "route endpoints (start, then goal)"}.`,
+      html`${exposureMap2}${legend}
+      <div style="font: 12px var(--sans-serif, sans-serif); margin-top: 4px">
+        <b style="color: #1a9fc9">Terrain-aware:</b> ${f(e.terrain)} ·
+        <b style="color: #d9822b">Range-only:</b> ${f(e.rangeOnly)} ·
+        <b style="color: #888">Straight:</b> ${f(e.straight)}
+      </div>`)}
+  </div>`;
+}

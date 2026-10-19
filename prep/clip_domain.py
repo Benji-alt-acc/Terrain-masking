@@ -9,7 +9,9 @@ place (no unmodelled "outside" next to it). Analysis stays inside the AOI.
 
 Outputs (data/domain/), same raw Float32 layout as prep/clip_aoi.py, with a
 domain_ prefix so they don't clash with the AOI attachments in Observable:
-- domain_dem.f32, domain_hillshade.f32
+- domain_dem.f32, domain_hillshade.f32 (used by the notebook)
+- domain_<metric>.f32 for slope, relief/tpi/dev at 150/500/1500 m (used by the
+  hypothesis batch; clipped from the 40 km run, so windows aren't truncated)
 - domain_meta.json (grid, plus the AOI window inside the domain)
 
 Usage: python prep/clip_domain.py
@@ -41,7 +43,7 @@ assert not np.ma.is_masked(dem), "DEM has nodata in the domain"
 
 layers = {"dem": dem.filled()}
 with np.load(root / "data" / "dem_missoula_30m_metrics.npz") as m:
-    layers["hillshade"] = m["hillshade"][ROW:ROW + N, COL:COL + N]
+    layers.update({k: m[k][ROW:ROW + N, COL:COL + N] for k in m.files})
 
 xmin, ymin, xmax, ymax = bounds
 meta = {

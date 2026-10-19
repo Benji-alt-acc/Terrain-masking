@@ -1,0 +1,46 @@
+// Low-altitude robustness checks: ONE cell (OJS).
+// Attachment: data/domain/low_altitude_checks.csv (from prep/low_altitude_checks.mjs).
+// Setup: iteration 2 (buffered domain, 30 sensors, R50 3 km, endurance limit 2x),
+// 10 random start-goal pairs inside the AOI. Left: share of the AOI that is dark
+// (< 50% detection per km). Right: median terrain saving (1 - terrain-aware /
+// range-only expected detections), with the interquartile range across pairs.
+
+// ---- cell ----
+lowAltitudeChecks = {
+  const data = await FileAttachment("low_altitude_checks.csv").csv({typed: true});
+  const series = [
+    {name: "30 m DEM, ramp 0 m", check: "ramp", setting: 0},
+    {name: "30 m DEM, ramp 10 m", check: "ramp", setting: 10},
+    {name: "30 m DEM, ramp 20 m (default)", check: "ramp", setting: 20},
+    {name: "30 m DEM, ramp 40 m", check: "ramp", setting: 40},
+    {name: "10 m DEM, ramp 20 m", check: "dem", setting: "10 m"}
+  ];
+  const colors = ["#9ecae1", "#6baed6", "#2171b5", "#08306b", "#e6550d"];
+  const rowsFor = (s, metric) => data.filter((d) => d.check === s.check && d.setting === s.setting && d.metric === metric);
+  const dark = series.flatMap((s) => rowsFor(s, "dark_frac").map((d) => ({series: s.name, altitude: d.altitude, value: d.value})));
+  const saving = series.flatMap((s) => d3.groups(rowsFor(s, "saving"), (d) => d.altitude).map(([altitude, v]) => {
+    const x = v.map((d) => d.value).sort(d3.ascending);
+    return {series: s.name, altitude, median: d3.quantileSorted(x, 0.5), q1: d3.quantileSorted(x, 0.25), q3: d3.quantileSorted(x, 0.75)};
+  }));
+  const common = {
+    width: 380, height: 280,
+    x: {label: "Flight altitude (m AGL)", type: "log", ticks: [10, 20, 30, 50, 100], tickFormat: "d"},
+    color: {domain: series.map((s) => s.name), range: colors},
+  };
+  const dash = (s) => (s.startsWith("10 m") ? "5,3" : null);
+  const panel = (opts, marks) => Plot.plot({...common, ...opts, marks});
+  const left = panel({y: {label: "Dark share of AOI", tickFormat: "%", grid: true, domain: [0, null]}}, [
+    ...series.map((s) => Plot.line(dark.filter((d) => d.series === s.name), {x: "altitude", y: "value", stroke: "series", strokeDasharray: dash(s.name), marker: "dot"})),
+    Plot.ruleY([0])
+  ]);
+  const right = panel({y: {label: "Terrain saving vs range-only (median, IQR)", tickFormat: "%", grid: true}}, [
+    ...series.map((s) => Plot.ruleX(saving.filter((d) => d.series === s.name), {x: "altitude", y1: "q1", y2: "q3", stroke: "series", strokeOpacity: 0.35, strokeWidth: 6})),
+    ...series.map((s) => Plot.line(saving.filter((d) => d.series === s.name), {x: "altitude", y: "median", stroke: "series", strokeDasharray: dash(s.name), marker: "dot"})),
+    Plot.ruleY([0])
+  ]);
+  return html`<figure style="margin: 0">
+    ${Plot.legend({color: common.color, columns: 3})}
+    <div style="display: flex; flex-wrap: wrap; gap: 24px">${left}${right}</div>
+    <figcaption>Robustness of the low-altitude results to the clearance-ramp width and DEM resolution. Iteration 2 setup, 10 random AOI start-goal pairs, endurance limit 2×.</figcaption>
+  </figure>`;
+}

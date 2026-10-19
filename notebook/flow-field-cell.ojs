@@ -1,0 +1,94 @@
+// Cost-to-go flow field (plan §8b, extension 1): ONE cell (OJS).
+//
+// One Dijkstra run outward from the goal gives, for every cell in the domain, the
+// least-exposure path to the goal (costs are symmetric). Each cell's next hop is
+// the optimal heading from there. Particles spawn everywhere and follow those
+// headings, so their trails gather into the corridors that optimal routes share.
+//
+// Reuses iteration 2: meta2, hazard2, endpoints2, routes2 (needs its terrainPenalty
+// field; replace routes2 with the current version in iteration2-cells.ojs), layout2,
+// layers2, shadowStyle, route. No new attachments.
+// Uses the same distance penalty as the terrain-aware route, so with the endurance
+// limit on, the field matches the limited route from the start. Click the map to
+// move the goal (kept inside the AOI).
+
+// ---- cell ----
+flowField2 = {
+  const {width: W, height: H, cell_m: cell, xmin, ymax, aoi} = meta2;
+  const {lit, dark} = shadowStyle;
+  const {goal} = endpoints2;
+  const goalIndex = Math.floor((ymax - goal.y) / cell) * W + Math.floor((goal.x - xmin) / cell);
+  const {prev} = route.dijkstra(hazard2, meta2, goalIndex, {lengthPenalty: routes2.terrainPenalty});
+
+  // Background: dimmed exposure map, AOI outline, sensors, goal (drawn once).
+  const bg = DOM.context2d(W, H, 1);
+  const img = bg.createImageData(W, H), px = img.data, hs = layers2.hillshade;
+  for (let i = 0; i < W * H; i++) {
+    const c = i % W, r = (i - c) / W;
+    const inAOI = c >= aoi.col && c < aoi.col + aoi.size && r >= aoi.row && r < aoi.row + aoi.size;
+    const g = 0.3 + 0.7 * Math.min(Math.max(hs[i], 0), 1);
+    const t = 1 - Math.exp(-1000 * hazard2[i]);
+    const b = g * (0.25 + 0.75 * t) * (inAOI ? 0.55 : 0.35);
+    for (let k = 0; k < 3; k++) px[4 * i + k] = (dark[k] * (1 - t) + lit[k] * t) * b;
+    px[4 * i + 3] = 255;
+  }
+  bg.putImageData(img, 0, 0);
+  const cx = (x) => (x - xmin) / cell, cy = (y) => (ymax - y) / cell;
+  bg.strokeStyle = "rgba(255,255,255,0.6)"; bg.lineWidth = 1;
+  bg.strokeRect(aoi.col, aoi.row, aoi.size, aoi.size);
+  bg.fillStyle = "#ff5028"; bg.strokeStyle = "white";
+  for (const s of layout2) { bg.beginPath(); bg.arc(cx(s.x), cy(s.y), 4, 0, 2 * Math.PI); bg.fill(); bg.stroke(); }
+  bg.fillStyle = "#ffd23f"; bg.strokeStyle = "black";
+  bg.fillRect(cx(goal.x) - 6, cy(goal.y) - 6, 12, 12); bg.strokeRect(cx(goal.x) - 6, cy(goal.y) - 6, 12, 12);
+
+  // Particles: positions in cell units (cell centres at +0.5), following next-hop pointers.
+  const N = 4000, MAX_AGE = 500, SPEED = 1.2;  // SPEED in cells per frame
+  const pX = new Float32Array(N), pY = new Float32Array(N), pCell = new Int32Array(N), pAge = new Int32Array(N);
+  const spawn = (k) => {
+    const i = Math.floor(Math.random() * W * H), c = i % W;
+    pCell[k] = i; pX[k] = c + 0.5; pY[k] = (i - c) / W + 0.5; pAge[k] = Math.floor(Math.random() * MAX_AGE);
+  };
+  for (let k = 0; k < N; k++) spawn(k);
+
+  const ctx = DOM.context2d(W, H, 1);
+  ctx.drawImage(bg.canvas, 0, 0);
+  let raf;
+  const frame = () => {
+    ctx.globalAlpha = 0.06;              // fade old trails back toward the background
+    ctx.drawImage(bg.canvas, 0, 0);
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = "rgba(63,216,255,0.9)"; ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    for (let k = 0; k < N; k++) {
+      const next = prev[pCell[k]];
+      if (next < 0 || ++pAge[k] > MAX_AGE) { spawn(k); continue; }
+      const nc = next % W, tx = nc + 0.5, ty = (next - nc) / W + 0.5;
+      const dx = tx - pX[k], dy = ty - pY[k], d = Math.hypot(dx, dy);
+      ctx.moveTo(pX[k], pY[k]);
+      if (d <= SPEED) { pX[k] = tx; pY[k] = ty; pCell[k] = next; }
+      else { pX[k] += dx / d * SPEED; pY[k] += dy / d * SPEED; }
+      ctx.lineTo(pX[k], pY[k]);
+    }
+    ctx.stroke();
+    raf = requestAnimationFrame(frame);
+  };
+  frame();
+  invalidation.then(() => cancelAnimationFrame(raf));
+
+  // Click to move the goal (clamped to the AOI).
+  const canvas = ctx.canvas;
+  canvas.style.cssText = "width: 100%; max-width: 800px; cursor: crosshair; display: block";
+  canvas.onclick = (e) => {
+    const r = canvas.getBoundingClientRect(), clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
+    const g = {
+      x: clamp(xmin + (e.clientX - r.left) / r.width * W * cell, aoi.xmin, aoi.xmax - 1),
+      y: clamp(ymax - (e.clientY - r.top) / r.height * H * cell, aoi.ymin + 1, aoi.ymax)
+    };
+    viewof endpoints2.value = {...endpoints2, goal: g};
+    viewof endpoints2.dispatchEvent(new Event("input", {bubbles: true}));
+  };
+  return html`<figure style="margin: 0">${canvas}<figcaption>Optimal headings toward the goal (yellow) from every cell at ${altitude2} m AGL.
+    Particles follow the least-exposure path from wherever they start; bright streams are corridors many optimal routes share.
+    ${enduranceLimit2 ? "Distance penalty from the endurance limit." : "No endurance limit: at low altitude, paths may detour far around the sensor network."}
+    Click to move the goal.</figcaption></figure>`;
+}
