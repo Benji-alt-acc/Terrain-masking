@@ -12,6 +12,8 @@
 //
 // Self-contained (no imports) so it can be loaded from an Observable attachment.
 // Sensor records: {x, y, z0 (antenna elevation, m), maxRange, minAGL (Float32Array, NaN = out of range)}.
+// minAGL may extend past maxRange (e.g. computed once for the largest range in use);
+// detection is cut off at maxRange (horizontal distance) regardless.
 
 export const defaults = {
   r50: 2000,       // m, per-scan 50% detection range for the reference RCS
@@ -51,7 +53,7 @@ export function addSensorHazard(h, dem, grid, s, A, p = defaults) {
       const i = r * W + c, m = s.minAGL[i];
       if (Number.isNaN(m) || A <= m) continue;
       const hd = Math.hypot((c - sc) * cell, (r - sr) * cell);
-      if (hd < p.minRange) continue;
+      if (hd < p.minRange || hd > s.maxRange) continue;
       const dz = dem[i] + A - s.z0;
       if (dz < tanMin * hd || dz > tanMax * hd) continue;
       const pd = pdScan(Math.hypot(hd, dz), A - m, p);

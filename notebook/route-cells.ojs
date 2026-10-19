@@ -1,0 +1,171 @@
+// Milestone 4: least-exposure route vs straight line (OJS).
+// Paste each block below into its OWN cell.
+//
+// Reuses: meta, layers, hazard, layout, coverMinAGL, mapView, shadowStyle, altitude.
+// Attachment: upload js/route.js as route.js.
+// The route map is its own cell, exposureMap1, alongside milestone 3's exposureMap
+// (no other cell refers to either by name). It also draws the routes and lets
+// map clicks set the route endpoints.
+
+// ---- cell: load the routing module ----
+route = {
+  const src = await FileAttachment("route.js").text();
+  return import(URL.createObjectURL(new Blob([src], {type: "text/javascript"})));
+}
+
+// ---- cell ----
+viewof editMode = Inputs.radio(["Sensors", "Route endpoints"], {value: "Sensors", label: "Map clicks edit"})
+
+// ---- cell: route endpoints (UTM 12N m). In "Route endpoints" mode, clicks set start, then goal, alternately ----
+viewof endpoints = {
+  const el = html`<div style="font: 13px sans-serif">`;
+  el.value = {start: {x: 266000, y: 5190000}, goal: {x: 276000, y: 5200000}};
+  el.next = "start";
+  const show = () => el.textContent =
+    `Start E ${el.value.start.x.toFixed(0)} N ${el.value.start.y.toFixed(0)} → goal E ${el.value.goal.x.toFixed(0)} N ${el.value.goal.y.toFixed(0)}. ` +
+    `Next click sets the ${el.next}.`;
+  show();
+  el.addEventListener("input", show);
+  return el;
+}
+
+// ---- cell: extra cost per km flown, in expected-detection units (0 = pure least exposure) ----
+viewof lengthPenalty = Inputs.range([0, 0.2], {value: 0, step: 0.005, label: "Distance penalty (per km)"})
+
+// ---- cell: optimal route on the hazard field at the current altitude ----
+bestRoute = route.leastExposureRoute(hazard, meta, endpoints.start, endpoints.goal, {lengthPenalty: lengthPenalty / 1000})
+
+// ---- cell: both routes scored the same way ----
+routeEval = {
+  const {start: s, goal: g} = endpoints;
+  return {
+    best: route.evaluateRoute(bestRoute.points, hazard, meta),
+    straight: route.evaluateRoute([[s.x, s.y], [g.x, g.y]], hazard, meta)
+  };
+}
+
+// ---- cell: comparison table ----
+{
+  const row = (name, e) => `| ${name} | ${(e.length / 1000).toFixed(1)} km | ${e.cumHazard.toFixed(2)} | ${e.pSurvive < 1e-4 ? e.pSurvive.toExponential(1) : (100 * e.pSurvive).toFixed(1) + "%"} |`;
+  return md`At **${altitude} m AGL**:
+
+| Route | Length | Expected detections | P(survive undetected) |
+|---|---|---|---|
+${row("Least exposure", routeEval.best)}
+${row("Straight line", routeEval.straight)}
+
+Expected detections = −ln P(survive): the cumulative hazard along the route.`;
+}
+
+// ---- cell: cumulative detection chance along each route ----
+Plot.plot({
+  width: 640,
+  height: 280,
+  x: {label: "Distance flown (km)"},
+  y: {label: "Cumulative P(detected)", domain: [0, 1], grid: true, tickFormat: "%"},
+  color: {domain: ["Least exposure", "Straight line"], range: ["#3fd8ff", "#888"], legend: true},
+  marks: [
+    ...[["Least exposure", routeEval.best], ["Straight line", routeEval.straight]].map(([name, e]) =>
+      Plot.line(e.profile.filter((_, i) => i % 10 === 0), {x: (d) => d.d / 1000, y: "pDetected", stroke: () => name})
+    ),
+    Plot.ruleY([0])
+  ]
+})
+
+// ---- cell: the exposure map with routes (milestone 4, iteration 1) ----
+exposureMap1 = {
+  const {width: W, height: H, cell_m: cell, xmin, ymax} = meta;
+  const {deep, lit, dark, outOfRange} = shadowStyle;
+  const hs = layers.hillshade, detect = mapView === "Detection per km flown";
+  const ctx = DOM.context2d(W, H, 1);
+  const img = ctx.createImageData(W, H), px = img.data;
+  for (let i = 0; i < W * H; i++) {
+    const g = 0.3 + 0.7 * Math.min(Math.max(hs[i], 0), 1);
+    if (detect) {
+      const t = 1 - Math.exp(-1000 * hazard[i]);  // P(detected per km flown): 0 = dark, 1 = lit
+      const b = g * (0.25 + 0.75 * t);
+      for (let k = 0; k < 3; k++) px[4 * i + k] = (dark[k] * (1 - t) + lit[k] * t) * b;
+    } else {
+      const a = coverMinAGL[i];
+      if (Number.isNaN(a)) {
+        for (let k = 0; k < 3; k++) px[4 * i + k] = outOfRange[k] * g;
+      } else {
+        const s = Math.sqrt(Math.min(a, deep) / deep);
+        const b = g * (1 - 0.75 * s);
+        for (let k = 0; k < 3; k++) px[4 * i + k] = (lit[k] * (1 - s) + dark[k] * s) * b;
+      }
+    }
+    px[4 * i + 3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+
+  // Routes (canvas pixel = cell).
+  const cx = (x) => (x - xmin) / cell, cy = (y) => (ymax - y) / cell;
+  const {start, goal} = endpoints;
+  ctx.setLineDash([6, 4]); ctx.strokeStyle = "rgba(255,255,255,0.8)"; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(cx(start.x), cy(start.y)); ctx.lineTo(cx(goal.x), cy(goal.y)); ctx.stroke();
+  ctx.setLineDash([]);
+  const pts = bestRoute.points;
+  for (const [w, color] of [[4.5, "rgba(0,0,0,0.6)"], [2.5, "#3fd8ff"]]) {
+    ctx.lineWidth = w; ctx.strokeStyle = color; ctx.lineJoin = "round";
+    ctx.beginPath();
+    pts.forEach(([x, y], k) => (k ? ctx.lineTo(cx(x), cy(y)) : ctx.moveTo(cx(x), cy(y))));
+    ctx.stroke();
+  }
+
+  // Sensors, then endpoints.
+  ctx.fillStyle = "#ff5028"; ctx.strokeStyle = "white"; ctx.lineWidth = 1.5;
+  for (const s of layout) {
+    ctx.beginPath();
+    ctx.arc(cx(s.x), cy(s.y), 5, 0, 2 * Math.PI);
+    ctx.fill(); ctx.stroke();
+  }
+  for (const [p, color] of [[start, "#3ddc84"], [goal, "#ffd23f"]]) {
+    ctx.fillStyle = color; ctx.strokeStyle = "black";
+    ctx.fillRect(cx(p.x) - 5, cy(p.y) - 5, 10, 10); ctx.strokeRect(cx(p.x) - 5, cy(p.y) - 5, 10, 10);
+  }
+
+  // Editing. Sensors mode: click empty map = add, drag = move, shift-click = remove.
+  // Route endpoints mode: click sets start, then goal, alternately.
+  const canvas = ctx.canvas;
+  canvas.style.cssText = "width: 100%; max-width: 667px; cursor: crosshair; touch-action: none";
+  const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
+  const toXY = (e) => {
+    const r = canvas.getBoundingClientRect();
+    return {
+      x: clamp(xmin + (e.clientX - r.left) / r.width * W * cell, xmin, xmin + W * cell - 1),
+      y: clamp(ymax - (e.clientY - r.top) / r.height * H * cell, ymax - H * cell + 1, ymax)
+    };
+  };
+  const hitRadius = () => 8 * W * cell / canvas.getBoundingClientRect().width;  // 8 screen px in metres
+  const hit = (p) => layout.findIndex((s) => Math.hypot(s.x - p.x, s.y - p.y) < hitRadius());
+  const commit = (view, value) => {
+    view.value = value;
+    view.dispatchEvent(new Event("input", {bubbles: true}));
+  };
+  let drag = -1;
+  canvas.onpointerdown = (e) => {
+    const p = toXY(e);
+    if (editMode === "Route endpoints") {
+      const el = viewof endpoints, which = el.next;
+      el.next = which === "start" ? "goal" : "start";
+      return commit(el, {...endpoints, [which]: p});
+    }
+    const i = hit(p);
+    if (i < 0) return commit(viewof layout, [...layout, p]);
+    if (e.shiftKey) return commit(viewof layout, layout.filter((_, j) => j !== i));
+    drag = i;
+    canvas.setPointerCapture(e.pointerId);
+    canvas.style.cursor = "grabbing";
+  };
+  canvas.onpointerup = (e) => {
+    if (drag < 0) return;
+    const p = toXY(e), i = drag;
+    drag = -1;
+    canvas.style.cursor = "crosshair";
+    if (Math.hypot(p.x - layout[i].x, p.y - layout[i].y) > hitRadius() / 4) {
+      commit(viewof layout, layout.map((s, j) => (j === i ? p : s)));
+    }
+  };
+  return canvas;
+}

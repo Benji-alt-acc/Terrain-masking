@@ -1,0 +1,323 @@
+// Milestone 4, iteration 2: buffered domain, R50 tied to max range, range-only control route (OJS).
+// Paste each block below into its OWN cell. Cell names end in 2 so they sit
+// alongside iteration 1 in the same notebook.
+//
+// Changes from iteration 1:
+//   - Routing domain = AOI + 5 km buffer with sensors at the same density, so the
+//     AOI edge is no longer next to an unmodelled (sensor-free) outside.
+//   - Max detection range = 2.5 x R50 (per-km detection < 1% beyond 2.4 x R50),
+//     with R50 defaulting to 3 km, where range-only gaps inside the AOI vanish.
+//   - Range-only control route: planned with terrain masking OFF, scored on the
+//     real (terrain-aware) hazard. Terrain-aware vs range-only isolates terrain.
+//
+//   - Optional endurance limit (toggle): routes capped at DETOUR_FACTOR2 x the
+//     straight-line distance, so low-altitude routes can't wander 100+ km
+//     around the sensor network.
+//
+// Reuses: vs, det, route (re-upload js/detection.js and js/route.js: both changed), shadowStyle.
+// Attachments (from data/domain/): domain_meta.json, domain_dem.f32,
+// domain_hillshade.f32, gap_vs_r50.csv.
+
+// ---- cell ----
+meta2 = FileAttachment("domain_meta.json").json()
+
+// ---- cell ----
+layers2 = {
+  const n = meta2.width * meta2.height;
+  const load = async (f) => {
+    const a = new Float32Array(await f.arrayBuffer());
+    if (a.length !== n) throw new Error(`${a.length} values, expected ${n}`);
+    return a;
+  };
+  return {
+    dem: await load(FileAttachment("domain_dem.f32")),
+    hillshade: await load(FileAttachment("domain_hillshade.f32"))
+  };
+}
+
+// ---- cell: viewsheds are computed once out to the largest range the R50 slider allows ----
+VIEW_RANGE2 = 2.5 * 3500
+
+// ---- cell: sensor layout over the whole domain (edit on the map) ----
+viewof layout2 = {
+  const el = html`<div style="font: 13px sans-serif">`;
+  // Highest point in the central 60% of each block: the 12 AOI blocks from
+  // iteration 1 plus a ring of 5 km buffer blocks (UTM 12N m). Notional sites.
+  el.value = [
+    [263625, 5207115], [268605, 5207445], [273615, 5205495], [278385, 5207595], [280635, 5207325], [288495, 5206545],
+    [263625, 5202165], [267675, 5202105], [272445, 5201265], [278475, 5202255], [281805, 5202255], [286365, 5201985],
+    [260925, 5191695], [268605, 5194065], [273615, 5192505], [276705, 5192985], [283635, 5194485], [286905, 5193795],
+    [261315, 5185485], [268605, 5187105], [273135, 5187465], [278085, 5184945], [281085, 5185245], [285645, 5185965],
+    [260625, 5179785], [268485, 5182575], [273405, 5181885], [278625, 5182065], [282195, 5182425], [287295, 5179575]
+  ].map(([x, y]) => ({x, y}));
+  const show = () => el.textContent = `${el.value.length} sensors (faded = buffer). Sensors mode: click to add, drag to move, shift-click to remove.`;
+  show();
+  el.addEventListener("input", show);
+  return el;
+}
+
+// ---- cell ----
+viewof altitude2 = Inputs.range([10, 500], {value: 50, step: 10, label: "Flight altitude (m AGL)"})
+
+// ---- cell ----
+viewof detForm2 = Inputs.form({
+  r50: Inputs.range([2000, 3500], {value: 3000, step: 250, label: "Per-scan R50 (m)"}),
+  rcs: Inputs.select(new Map([
+    ["0.01 m² (small quadcopter)", 0.01],
+    ["0.1 m² (large multirotor)", 0.1],
+    ["1 m² (small fixed-wing)", 1]
+  ]), {label: "Target RCS"}),
+  speed: Inputs.range([5, 40], {value: 15, step: 1, label: "Drone speed (m/s)"})
+})
+
+// ---- cell ----
+detParams2 = ({...det.defaults, ...detForm2})
+
+// ---- cell ----
+minAGLCache2 = new Map()
+
+// ---- cell: per-sensor records; viewsheds cached by position, so R50 changes don't re-trace ----
+sensorRecords2 = {
+  const keys = new Set(), maxRange = 2.5 * detParams2.r50;
+  const records = layout2.map(({x, y}) => {
+    const key = `${x},${y},${mastHeight}`;
+    keys.add(key);
+    if (!minAGLCache2.has(key)) {
+      minAGLCache2.set(key, vs.minVisibleAGL(layers2.dem, meta2, {x, y}, {height: mastHeight, maxRange: VIEW_RANGE2}));
+    }
+    return {x, y, maxRange, z0: vs.groundElevation(layers2.dem, meta2, x, y) + mastHeight, minAGL: minAGLCache2.get(key)};
+  });
+  for (const k of minAGLCache2.keys()) if (!keys.has(k)) minAGLCache2.delete(k);
+  return records;
+}
+
+// ---- cell: hazard per metre, terrain-aware ----
+hazard2 = det.hazardField(layers2.dem, meta2, sensorRecords2, altitude2, detParams2)
+
+// ---- cell: hazard per metre with terrain masking OFF (range, elevation limits and Pd model unchanged) ----
+hazardRangeOnly2 = {
+  const zero = new Float32Array(meta2.width * meta2.height);
+  return det.hazardField(layers2.dem, meta2, sensorRecords2.map((s) => ({...s, minAGL: zero})), altitude2, detParams2);
+}
+
+// ---- cell ----
+viewof mapView2 = Inputs.radio(["Terrain-aware detection", "Range-only detection"], {value: "Terrain-aware detection", label: "Show"})
+
+// ---- cell ----
+viewof editMode2 = Inputs.radio(["Sensors", "Route endpoints"], {value: "Sensors", label: "Map clicks edit"})
+
+// ---- cell: route endpoints, kept inside the AOI ----
+viewof endpoints2 = {
+  const el = html`<div style="font: 13px sans-serif">`;
+  el.value = {start: {x: 266000, y: 5190000}, goal: {x: 276000, y: 5200000}};
+  el.next = "start";
+  const show = () => el.textContent =
+    `Start E ${el.value.start.x.toFixed(0)} N ${el.value.start.y.toFixed(0)} → goal E ${el.value.goal.x.toFixed(0)} N ${el.value.goal.y.toFixed(0)}. ` +
+    `Next click sets the ${el.next} (clamped to the AOI).`;
+  show();
+  el.addEventListener("input", show);
+  return el;
+}
+
+// ---- cell ----
+viewof lengthPenalty2 = Inputs.range([0, 0.2], {value: 0, step: 0.005, label: "Distance penalty (per km)"})
+
+// ---- cell: endurance limit = max route length as a multiple of the straight-line distance ----
+DETOUR_FACTOR2 = 2
+
+// ---- cell ----
+viewof enduranceLimit2 = Inputs.toggle({label: `Endurance limit (${DETOUR_FACTOR2}× straight-line distance)`, value: false})
+
+// ---- cell: terrain-aware and range-only optimal routes (both limited when the toggle is on) ----
+routes2 = {
+  const {start, goal} = endpoints2, opts = {lengthPenalty: lengthPenalty2 / 1000};
+  const maxLength = DETOUR_FACTOR2 * Math.hypot(goal.x - start.x, goal.y - start.y);
+  const plan = (h) => enduranceLimit2
+    ? route.leastExposureRouteWithin(h, meta2, start, goal, maxLength, opts)
+    : route.leastExposureRoute(h, meta2, start, goal, opts);
+  const terrain = plan(hazard2), rangeOnly = plan(hazardRangeOnly2);
+  return {
+    terrain: terrain.points,
+    rangeOnly: rangeOnly.points,
+    straight: [[start.x, start.y], [goal.x, goal.y]],
+    limit: enduranceLimit2 ? {maxLength, terrainBinding: terrain.binding, rangeOnlyBinding: rangeOnly.binding} : null
+  };
+}
+
+// ---- cell: all three scored on the terrain-aware hazard (the real exposure) ----
+routeEval2 = {
+  const {aoi} = meta2;
+  const outside = (pts) => pts.filter(([x, y]) => x < aoi.xmin || x > aoi.xmax || y < aoi.ymin || y > aoi.ymax).length / pts.length;
+  return Object.fromEntries(["terrain", "rangeOnly", "straight"].map((k) =>
+    [k, {...route.evaluateRoute(routes2[k], hazard2, meta2), outside: k === "straight" ? 0 : outside(routes2[k])}]));
+}
+
+// ---- cell: comparison table ----
+{
+  const fmtP = (p) => (p < 1e-4 ? p.toExponential(1) : (100 * p).toFixed(1) + "%");
+  const row = (name, e) => `| ${name} | ${(e.length / 1000).toFixed(1)} km | ${(100 * e.outside).toFixed(0)}% | ${e.cumHazard.toFixed(2)} | ${fmtP(e.pSurvive)} |`;
+  const {limit} = routes2;
+  const limitNote = !limit ? "Endurance limit off."
+    : `Endurance limit on: max ${(limit.maxLength / 1000).toFixed(1)} km. ` +
+      `Binding for terrain-aware: ${limit.terrainBinding ? "yes" : "no"}; range-only: ${limit.rangeOnlyBinding ? "yes" : "no"}.`;
+  return md`At **${altitude2} m AGL**, R50 ${detParams2.r50} m (max range ${2.5 * detParams2.r50} m), all routes scored on the terrain-aware hazard. ${limitNote}
+
+| Route | Length | In buffer | Expected detections | P(survive undetected) |
+|---|---|---|---|---|
+${row("Terrain-aware least exposure", routeEval2.terrain)}
+${row("Range-only least exposure (control)", routeEval2.rangeOnly)}
+${row("Straight line", routeEval2.straight)}
+
+The gap between the first two rows is what terrain adds once range is accounted for.`;
+}
+
+// ---- cell: cumulative expected detections along each route ----
+Plot.plot({
+  width: 640,
+  height: 280,
+  x: {label: "Distance flown (km)"},
+  y: {label: "Cumulative expected detections", type: "symlog", grid: true},
+  color: {
+    domain: ["Terrain-aware", "Range-only", "Straight line"],
+    range: ["#3fd8ff", "#ffa03c", "#888"],
+    legend: true
+  },
+  marks: [
+    ...[["Terrain-aware", routeEval2.terrain], ["Range-only", routeEval2.rangeOnly], ["Straight line", routeEval2.straight]].map(([name, e]) =>
+      Plot.line(e.profile.filter((_, i) => i % 10 === 0), {x: (d) => d.d / 1000, y: "cumHazard", stroke: () => name})
+    ),
+    Plot.ruleY([0])
+  ]
+})
+
+// ---- cell: the domain map (also the sensor / endpoint editor) ----
+exposureMap2 = {
+  const {width: W, height: H, cell_m: cell, xmin, ymax, aoi} = meta2;
+  const {lit, dark} = shadowStyle;
+  const hs = layers2.hillshade, h = mapView2 === "Terrain-aware detection" ? hazard2 : hazardRangeOnly2;
+  const ctx = DOM.context2d(W, H, 1);
+  const img = ctx.createImageData(W, H), px = img.data;
+  for (let i = 0; i < W * H; i++) {
+    const c = i % W, r = (i - c) / W;
+    const inAOI = c >= aoi.col && c < aoi.col + aoi.size && r >= aoi.row && r < aoi.row + aoi.size;
+    const g = 0.3 + 0.7 * Math.min(Math.max(hs[i], 0), 1);
+    const t = 1 - Math.exp(-1000 * h[i]);  // P(detected per km flown)
+    const b = g * (0.25 + 0.75 * t) * (inAOI ? 1 : 0.55);  // buffer dimmed
+    for (let k = 0; k < 3; k++) px[4 * i + k] = (dark[k] * (1 - t) + lit[k] * t) * b;
+    px[4 * i + 3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+
+  const cx = (x) => (x - xmin) / cell, cy = (y) => (ymax - y) / cell;
+  ctx.strokeStyle = "white"; ctx.lineWidth = 1.5;
+  ctx.strokeRect(aoi.col, aoi.row, aoi.size, aoi.size);
+
+  // Routes: straight (dashed), range-only (orange), terrain-aware (cyan).
+  const {start, goal} = endpoints2;
+  ctx.setLineDash([6, 4]); ctx.strokeStyle = "rgba(255,255,255,0.8)";
+  ctx.beginPath(); ctx.moveTo(cx(start.x), cy(start.y)); ctx.lineTo(cx(goal.x), cy(goal.y)); ctx.stroke();
+  ctx.setLineDash([]);
+  for (const [pts, color] of [[routes2.rangeOnly, "#ffa03c"], [routes2.terrain, "#3fd8ff"]]) {
+    for (const [w, c] of [[4.5, "rgba(0,0,0,0.6)"], [2.5, color]]) {
+      ctx.lineWidth = w; ctx.strokeStyle = c; ctx.lineJoin = "round";
+      ctx.beginPath();
+      pts.forEach(([x, y], k) => (k ? ctx.lineTo(cx(x), cy(y)) : ctx.moveTo(cx(x), cy(y))));
+      ctx.stroke();
+    }
+  }
+
+  // Sensors (buffer ones faded), then endpoints.
+  ctx.strokeStyle = "white"; ctx.lineWidth = 1.5;
+  for (const s of layout2) {
+    const inside = s.x >= aoi.xmin && s.x <= aoi.xmax && s.y >= aoi.ymin && s.y <= aoi.ymax;
+    ctx.fillStyle = inside ? "#ff5028" : "rgba(255,80,40,0.55)";
+    ctx.beginPath(); ctx.arc(cx(s.x), cy(s.y), 5, 0, 2 * Math.PI); ctx.fill(); ctx.stroke();
+  }
+  for (const [p, color] of [[start, "#3ddc84"], [goal, "#ffd23f"]]) {
+    ctx.fillStyle = color; ctx.strokeStyle = "black";
+    ctx.fillRect(cx(p.x) - 5, cy(p.y) - 5, 10, 10); ctx.strokeRect(cx(p.x) - 5, cy(p.y) - 5, 10, 10);
+  }
+
+  // Editing (same gestures as iteration 1). Endpoints are clamped to the AOI.
+  const canvas = ctx.canvas;
+  canvas.style.cssText = "width: 100%; max-width: 800px; cursor: crosshair; touch-action: none";
+  const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
+  const toXY = (e, box) => {
+    const r = canvas.getBoundingClientRect();
+    return {
+      x: clamp(xmin + (e.clientX - r.left) / r.width * W * cell, box.xmin, box.xmax - 1),
+      y: clamp(ymax - (e.clientY - r.top) / r.height * H * cell, box.ymin + 1, box.ymax)
+    };
+  };
+  const domainBox = {xmin, xmax: xmin + W * cell, ymin: ymax - H * cell, ymax};
+  const hitRadius = () => 8 * W * cell / canvas.getBoundingClientRect().width;
+  const hit = (p) => layout2.findIndex((s) => Math.hypot(s.x - p.x, s.y - p.y) < hitRadius());
+  const commit = (view, value) => {
+    view.value = value;
+    view.dispatchEvent(new Event("input", {bubbles: true}));
+  };
+  let drag = -1;
+  canvas.onpointerdown = (e) => {
+    if (editMode2 === "Route endpoints") {
+      const el = viewof endpoints2, which = el.next;
+      el.next = which === "start" ? "goal" : "start";
+      return commit(el, {...endpoints2, [which]: toXY(e, aoi)});
+    }
+    const p = toXY(e, domainBox), i = hit(p);
+    if (i < 0) return commit(viewof layout2, [...layout2, p]);
+    if (e.shiftKey) return commit(viewof layout2, layout2.filter((_, j) => j !== i));
+    drag = i;
+    canvas.setPointerCapture(e.pointerId);
+    canvas.style.cursor = "grabbing";
+  };
+  canvas.onpointerup = (e) => {
+    if (drag < 0) return;
+    const p = toXY(e, domainBox), i = drag;
+    drag = -1;
+    canvas.style.cursor = "crosshair";
+    if (Math.hypot(p.x - layout2[i].x, p.y - layout2[i].y) > hitRadius() / 4) {
+      commit(viewof layout2, layout2.map((s, j) => (j === i ? p : s)));
+    }
+  };
+  return canvas;
+}
+
+// ---- cell: legend ----
+Plot.legend({
+  color: {
+    domain: [0, 1],
+    interpolate: (t) => {
+      const {lit, dark} = shadowStyle, b = 0.85 * (0.25 + 0.75 * t);
+      return `rgb(${dark.map((v, k) => (v * (1 - t) + lit[k] * t) * b)})`;
+    },
+    tickFormat: "%",
+    label: `Chance of detection per km flown at ${altitude2} m AGL (buffer dimmed)`
+  },
+  width: 400
+})
+
+// ---- cell: precomputed by prep/gap_vs_r50.mjs (default layouts) ----
+gapData2 = FileAttachment("gap_vs_r50.csv").csv({typed: true})
+
+// ---- cell: why iteration 2: range gaps vs terrain shadow, and the edge effect ----
+Plot.plot({
+  width: 760,
+  height: 280,
+  marginRight: 20,
+  fx: {label: "Flight altitude (m AGL)"},
+  x: {label: "Per-scan R50 (m)", ticks: 4},
+  y: {label: "Share of AOI with < 50% detection per km", tickFormat: "%", grid: true},
+  color: {
+    domain: ["range_gap", "all_dark", "edge_strip_dark"],
+    range: ["#ffa03c", "#3f6fd8", "#c0392b"],
+    tickFormat: (m) => ({range_gap: "Range gaps (no terrain)", all_dark: "All dark (with terrain)", edge_strip_dark: "Dark within 1.5 km of AOI edge"})[m],
+    legend: true
+  },
+  marks: [
+    Plot.line(gapData2.filter((d) => d.config === "Buffered domain"), {fx: "altitude", x: "r50", y: "value", stroke: "metric", strokeWidth: 2}),
+    Plot.line(gapData2.filter((d) => d.config === "AOI only"), {fx: "altitude", x: "r50", y: "value", stroke: "metric", strokeDasharray: "4,3"}),
+    Plot.ruleX([detParams2.r50], {stroke: "#999", strokeDasharray: "2,2"}),
+    Plot.ruleY([0])
+  ],
+  caption: "Solid: buffered domain (iteration 2, 30 sensors). Dashed: AOI only (iteration 1, 12 sensors). Max range = 2.5 x R50."
+})

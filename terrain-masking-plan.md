@@ -45,6 +45,12 @@ Caveat: the detection model is derived from the same DEM being tested, so this i
 - Scenario: AREA defense of the whole 20 × 20 km AOI (not point defense), to expose terrain variation across the Missoula valley. Many sensors needed (see §5 sensor count).
 - Calibration note: with dwell accumulation, effective crossing range ≈ 1.7–1.8 × per-scan R50 (v = 15 m/s, T_scan = 1 s), and coverage edges in open terrain are sharp; soft edges come from terrain. Choose per-scan R50 ≈ 2 km so effective small-drone range ≈ 3.5 km.
 - Attacker is assumed to know all sensor positions and the model exactly (pessimistic for defender). State this.
+- Milestone 4 iteration 2 (2026-10-18), after iteration 1 routes threaded range gaps between sensors and hugged the AOI edge:
+  - R50 default 3 km with max range tied to 2.5 x R50 (per-km detection < 1% beyond 2.4 x R50). Range-only gaps in the AOI drop from ~20% (R50 2 km) to 0% (R50 >= 2.75 km), so remaining dark area is terrain shadow. Chosen over adding sensors, because more sensors also add new lines of sight and real budgets limit sensor count.
+  - Range-only control route (masking off, scored on the terrain-aware hazard). Terrain effect = terrain-aware vs range-only, not vs straight line.
+  - Buffered routing domain: AOI + 5 km (`prep/clip_domain.py`, 1001 x 1001), sensors at the same block density in the buffer (30 total). AOI edge strip is now as dark as the interior (16% vs 15% at 50 m, R50 3 km; AOI-only: 24% vs 17%). Endpoints and analysis stay in the AOI.
+  - Evidence: `prep/gap_vs_r50.mjs` -> `data/domain/gap_vs_r50.csv`.
+  - Endurance limit (optional toggle, default 2x straight-line distance): below ~30 m AGL unlimited routes wander 100-140 km and hug the domain's outer edge (the buffer just moves the edge). `route.leastExposureRouteWithin` = Lagrangian relaxation (smallest extra per-metre penalty whose route fits). Default endpoints, terrain-aware vs range-only expected detections with the limit: 10 m 23.9 vs 30.7, 20 m 147 vs 179, 30 m 164 vs 191, 50 m 183 vs 206 (limit not binding at >= 50 m). Use a fixed detour factor in the hypothesis batch.
 - Missoula County (or nearby) is acceptable as a NOTIONAL defended valley; not a realistic adversary scenario. Say so in the write-up.
 
 ## 3. Data
